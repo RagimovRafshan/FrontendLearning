@@ -1,0 +1,64 @@
+```
+# Dependencies
+go.sum
+vendor/
+
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+*.out
+*.bin
+
+# Build artifacts
+bin/
+build/
+dist/
+target/
+
+# Environment
+.env
+.env.local
+.env.*
+
+# Logs
+*.log
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.tmp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Coverage
+coverage/
+htmlcov/
+.coverage
+
+# Cache
+__pycache__/
+*.pyc
+*.pyo
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Testing
+*.test
+*.tests
+
+# Distribution / packaging
+.Python
+eggs/
+.eggs/
+partially-written/
+*.egg-info/
+.nox/
+.tox/
+```
