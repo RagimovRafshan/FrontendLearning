@@ -1,53 +1,131 @@
-# Backend мессенджера на Go
+# Messenger Backend
+
+Высоконагруженный backend мессенджера на Go с использованием ScyllaDB, Redis, MinIO S3 и ElasticSearch.
+
+## Особенности
+
+- **HTTPS** сервер с TLS 1.2+
+- **MessagePack** формат для передачи данных (быстрее JSON)
+- **Аутентификация** на основе токенов
+- **Rate limiting** для защиты от DDoS
+- **CORS** поддержка
+- **Graceful shutdown**
 
 ## Структура проекта
 
 ```
-messenger/
-├── config/
-│   ├── config.go      # Структуры конфигурации
-│   └── loader.go      # Загрузка и валидация конфигурации
+├── cmd/server          # Точка входа
+├── config              # Конфигурация
 ├── internal/
-│   └── storage/
-│       ├── scylladb.go      # Клиент ScyllaDB
-│       ├── redis.go         # Клиент Redis
-│       ├── minio.go         # Клиент MinIO S3
-│       └── elasticsearch.go # Клиент ElasticSearch
-├── go.mod
-└── README.md
+│   ├── handler         # HTTP обработчики
+│   ├── middleware      # Middleware (auth, rate limit, cors)
+│   ├── model           # Модели данных
+│   ├── service         # Бизнес логика
+│   └── storage         # Клиенты БД и хранилищ
+├── pkg/msgpack         # MessagePack сериализация
+└── .env.example        # Пример конфигурации
 ```
 
-## Конфигурация
+## Быстрый старт
 
-Все сервисы настроены на подключение к localhost по умолчанию.
+### 1. Запуск зависимостей (Docker Compose)
 
-### Переменные окружения
+```bash
+docker-compose up -d
+```
 
-#### ScyllaDB
-- SCYLLA_HOSTS=localhost:9042
-- SCYLLA_KEYSPACE=messenger
-- SCYLLA_TIMEOUT=5s
-- SCYLLA_CONNECT_TIMEOUT=10s
+### 2. Генерация SSL сертификатов
 
-#### Redis
-- REDIS_ADDR=localhost:6379
-- REDIS_DB=0
-- REDIS_POOL_SIZE=100
+```bash
+mkdir -p certs
+openssl req -x509 -newkey rsa:4096 -keyout certs/server.key -out certs/server.crt -days 365 -nodes
+```
 
-#### MinIO S3
-- MINIO_ENDPOINT=localhost:9000
-- MINIO_ACCESS_KEY_ID=minioadmin
-- MINIO_SECRET_ACCESS_KEY=minioadmin
-- MINIO_BUCKET_NAME=messenger-files
+### 3. Настройка конфигурации
 
-#### ElasticSearch
-- ELASTICSEARCH_ADDRESSES=http://localhost:9200
-- ELASTICSEARCH_INDEX_PREFIX=messenger
+```bash
+cp .env.example .env
+```
 
-## Требования
+### 4. Установка зависимостей
 
-- Go 1.19+
-- ScyllaDB (localhost:9042)
-- Redis (localhost:6379)
-- MinIO (localhost:9000)
-- ElasticSearch (localhost:9200)
+```bash
+go mod tidy
+```
+
+### 5. Запуск сервера
+
+```bash
+go run ./cmd/server
+```
+
+## API Endpoints
+
+| Метод | Путь | Описание |
+|-------|------|----------|
+| POST | /api/v1/auth/register | Регистрация пользователя |
+| POST | /api/v1/auth/login | Вход |
+| POST | /api/v1/auth/refresh | Обновление токена |
+| POST | /api/v1/auth/logout | Выход |
+| GET | /health | Проверка здоровья |
+
+## Формат запросов
+
+По умолчанию используется **MessagePack**:
+
+```bash
+# Регистрация
+curl -k -X POST https://localhost:8443/api/v1/auth/register \
+  -H "Content-Type: application/msgpack" \
+  --data-binary $(python3 -c "import msgpack; print(msgpack.packb({'login': 'user', 'password': 'pass'}).hex())" | xxd -r -p)
+
+# Вход
+curl -k -X POST https://localhost:8443/api/v1/auth/login \
+  -H "Content-Type: application/msgpack" \
+  --data-binary $(python3 -c "import msgpack; print(msgpack.packb({'login': 'user', 'password': 'pass'}).hex())" | xxd -r -p)
+```
+
+Также поддерживается JSON:
+
+```bash
+curl -k -X POST https://localhost:8443/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"login":"user","password":"pass"}'
+```
+
+## Переменные окружения
+
+### ScyllaDB
+- `SCYLLA_HOSTS` - хосты (default: localhost:9042)
+- `SCYLLA_KEYSPACE` - keyspace (default: messenger)
+
+### Redis
+- `REDIS_ADDR` - адрес (default: localhost:6379)
+- `REDIS_PASSWORD` - пароль
+
+### MinIO
+- `MINIO_ENDPOINT` - endpoint (default: localhost:9000)
+- `MINIO_ACCESS_KEY` - access key (default: minioadmin)
+- `MINIO_SECRET_KEY` - secret key (default: minioadmin)
+
+### ElasticSearch
+- `ES_ADDRESSES` - адреса (default: http://localhost:9200)
+
+### Сервер
+- `SERVER_PORT` - порт HTTPS (default: 8443)
+- `CERT_FILE` - путь к сертификату
+- `KEY_FILE` - путь к ключу
+
+## Архитектура аутентификации
+
+Система использует двухтокенную схему:
+- **Access Token** - короткоживущий токен для доступа к API
+- **Refresh Token** - долгоживущий токен для обновления access token
+
+Пароли хранятся в хешированном виде (bcrypt).
+
+## Производительность
+
+- Rate limiting: 1000 RPS по умолчанию
+- Connection pooling для всех клиентов
+- Async graceful shutdown
