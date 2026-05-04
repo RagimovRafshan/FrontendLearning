@@ -3,42 +3,25 @@
 *.o
 *.obj
 *.out
-*.exe
-*.dll
-*.so
-*.a
 
 # Dependencies
 vendor/
-*.mod
-*.sum
 
 # Logs and temp files
 *.log
 *.tmp
-*.swp
 
 # Environment
 .env
 .env.local
-*.env.*
+.env.*
 
 # Editors
 .vscode/
 .idea/
-*.swp
-*.swo
 
-# Build directories
-bin/
-target/
-
-# Coverage
-coverage/
-htmlcov/
-.coverage
-
-# Go specific
-*.test
-*.prof
+# Go-specific
+*.so
+*.exe
+*.dll
 ```

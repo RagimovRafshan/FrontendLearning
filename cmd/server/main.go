@@ -1,194 +1,114 @@
 package main
 
 import (
-"context"
-"crypto/tls"
-"fmt"
-"log"
-"net/http"
-"os"
-"os/signal"
-"syscall"
-"time"
+	"context"
+	"crypto/tls"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
-"messenger/config"
-"messenger/internal/handlers"
-"messenger/internal/middleware"
-"messenger/internal/storage"
-"messenger/internal/websocket"
-
-"github.com/gorilla/mux"
+	"messenger/config"
+	"messenger/internal/handler"
+	"messenger/internal/service"
+	"messenger/internal/websocket"
 )
 
 func main() {
-// Загрузка конфигурации
-cfg, err := config.Load()
-if err != nil {
-log.Fatalf("Failed to load config: %v", err)
-}
+	// Загрузка конфигурации
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
+	}
 
-// Инициализация хранилищ
-scylla, err := storage.NewScyllaDBClient(cfg.ScyllaDB.Hosts, cfg.ScyllaDB.Keyspace)
-if err != nil {
-log.Printf("Warning: ScyllaDB connection failed: %v", err)
-}
+	// Валидация конфигурации
+	if err := cfg.Validate(); err != nil {
+		log.Fatalf("Invalid config: %v", err)
+	}
 
-redis, err := storage.NewRedisClient(cfg.Redis.Addr, cfg.Redis.Password)
-if err != nil {
-log.Printf("Warning: Redis connection failed: %v", err)
-}
+	// Создание сервисов
+	authService := service.NewAuthService()
+	chatService := service.NewChatService()
+	hub := websocket.NewHub()
 
-minio, err := storage.NewMinIOClient(cfg.MinIO.Endpoint, cfg.MinIO.AccessKey, cfg.MinIO.SecretKey, cfg.MinIO.UseSSL)
-if err != nil {
-log.Printf("Warning: MinIO connection failed: %v", err)
-}
+	// Запуск хаба
+	go hub.Run()
 
-elastic, err := storage.NewElasticsearchClient(cfg.Elasticsearch.URL)
-if err != nil {
-log.Printf("Warning: Elasticsearch connection failed: %v", err)
-}
+	// Создание обработчика WebSocket
+	wsHandler := handler.NewWSHandler(authService, chatService, hub)
 
-// Инициализация обработчиков
-authHandler := handlers.NewAuthHandler(redis, cfg.JWT.Secret)
-userHandler := handlers.NewUserHandler(elastic)
-chatHandler := handlers.NewChatHandler(scylla, elastic)
-messageHandler := handlers.NewMessageHandler(scylla)
-wsManager := websocket.NewWSManager()
+	// HTTP mux
+	mux := http.NewServeMux()
 
-// Middleware
-authMiddleware := middleware.NewAuthMiddleware(authHandler)
-corsMiddleware := middleware.NewCORSMiddleware(nil, nil, nil)
-rateLimitMiddleware := middleware.NewRateLimitMiddleware(1000, 60)
-recoveryMiddleware := middleware.RecoveryMiddleware
+	// WebSocket endpoint - единственная точка входа
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		hub.ServeWS(w, r, wsHandler.HandleMessage)
+	})
 
-// Создание роутера
-r := mux.NewRouter()
+	// Health check endpoint
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"ok"}`))
+	})
 
-// Применяем middleware
-r.Use(recoveryMiddleware)
-r.Use(corsMiddleware.Middleware)
-r.Use(rateLimitMiddleware.Middleware)
+	// TLS конфигурация для высокой нагрузки
+	tlsConfig := &tls.Config{
+		MinVersion:               tls.VersionTLS12,
+		CurvePreferences:         []tls.CurveID{tls.X25519, tls.CurveP256},
+		PreferServerCipherSuites: true,
+		CipherSuites: []uint16{
+			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
+			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+		},
+	}
 
-// Public routes (без авторизации)
-publicRouter := r.PathPrefix("/api/v1").Subrouter()
-publicRouter.HandleFunc("/auth/register", authHandler.Register).Methods("POST")
-publicRouter.HandleFunc("/auth/login", authHandler.Login).Methods("POST")
-publicRouter.HandleFunc("/auth/forgot-password", authHandler.ForgotPassword).Methods("POST")
-publicRouter.HandleFunc("/auth/refresh-token", authHandler.RefreshToken).Methods("POST")
+	server := &http.Server{
+		Addr:         fmt.Sprintf(":%d", cfg.Server.Port),
+		Handler:      mux,
+		TLSConfig:    tlsConfig,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
 
-// Protected routes (с авторизацией)
-protectedRouter := r.PathPrefix("/api/v1").Subrouter()
-protectedRouter.Use(authMiddleware.Middleware)
+	// Graceful shutdown
+	go func() {
+		sigint := make(chan os.Signal, 1)
+		signal.Notify(sigint, os.Interrupt, syscall.SIGTERM)
+		<-sigint
 
-// Auth
-protectedRouter.HandleFunc("/auth/logout", authHandler.Logout).Methods("POST")
+		log.Println("Shutting down server...")
 
-// Users
-protectedRouter.HandleFunc("/users/search", userHandler.FindUsers).Methods("POST")
-protectedRouter.HandleFunc("/users/profile", userHandler.EditProfile).Methods("PUT")
-protectedRouter.HandleFunc("/users/profile", userHandler.GetProfile).Methods("GET")
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 
-// Chats
-protectedRouter.HandleFunc("/chats/create-by-link", chatHandler.CreateChatByLink).Methods("POST")
-protectedRouter.HandleFunc("/chats/create-with-user", chatHandler.CreateChatWithUser).Methods("POST")
-protectedRouter.HandleFunc("/chats/create-group", chatHandler.CreateGroupChat).Methods("POST")
-protectedRouter.HandleFunc("/chats/create-channel", chatHandler.CreateChannel).Methods("POST")
-protectedRouter.HandleFunc("/chats/edit-group", chatHandler.EditGroupChat).Methods("PUT")
-protectedRouter.HandleFunc("/chats/edit-channel", chatHandler.EditChannel).Methods("PUT")
-protectedRouter.HandleFunc("/chats/get", chatHandler.GetChat).Methods("GET")
+		if err := server.Shutdown(ctx); err != nil {
+			log.Printf("Server shutdown error: %v", err)
+		}
+	}()
 
-// Messages
-protectedRouter.HandleFunc("/messages/send", messageHandler.SendMessage).Methods("POST")
-protectedRouter.HandleFunc("/messages/get", messageHandler.GetMessage).Methods("POST")
-protectedRouter.HandleFunc("/messages/edit", messageHandler.EditMessage).Methods("PUT")
-protectedRouter.HandleFunc("/messages/chat", messageHandler.GetChatMessages).Methods("GET")
+	log.Printf("Starting messenger server on :%d with TLS", cfg.Server.Port)
+	log.Printf("WebSocket endpoint: wss://localhost:%d/ws", cfg.Server.Port)
+	log.Println("\n=== Messenger Server Ready ===")
+	log.Println("All communication via WebSocket with MessagePack binary format")
+	log.Println("Commands: register, login, send_message, create_chat, etc.")
 
-// WebSocket для реального времени
-r.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-// Проверяем авторизацию через токен в query param или заголовке
-token := r.URL.Query().Get("token")
-if token == "" {
-token = r.Header.Get("Authorization")
-if len(token) > 7 && token[:7] == "Bearer " {
-token = token[7:]
-}
-}
+	// Запуск сервера
+	if cfg.Server.CertFile == "" || cfg.Server.KeyFile == "" {
+		log.Fatal("Server requires TLS certificates. Set SERVER_CERT_FILE and SERVER_KEY_FILE")
+	}
 
-if token == "" {
-http.Error(w, "Unauthorized", http.StatusUnauthorized)
-return
-}
+	if err := server.ListenAndServeTLS(cfg.Server.CertFile, cfg.Server.KeyFile); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("Server error: %v", err)
+	}
 
-userID, login, valid := authHandler.GetUserByToken(token)
-if !valid {
-http.Error(w, "Invalid token", http.StatusUnauthorized)
-return
-}
-
-// Добавляем в контекст и передаем в WS handler
-ctx := context.WithValue(r.Context(), "user_id", userID)
-ctx = context.WithValue(ctx, "login", login)
-wsManager.HandleWS(w, r.WithContext(ctx))
-}).Methods("GET")
-
-// Health check
-r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-w.WriteHeader(http.StatusOK)
-w.Write([]byte(`{"status":"ok"}`))
-}).Methods("GET")
-
-// HTTPS сервер
-tlsConfig := &tls.Config{
-MinVersion: tls.VersionTLS12,
-CipherSuites: []uint16{
-tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-},
-PreferServerCipherSuites: true,
-}
-
-server := &http.Server{
-Addr:         fmt.Sprintf(":%d", cfg.Server.Port),
-Handler:      r,
-TLSConfig:    tlsConfig,
-ReadTimeout:  15 * time.Second,
-WriteTimeout: 15 * time.Second,
-IdleTimeout:  60 * time.Second,
-}
-
-// Graceful shutdown
-go func() {
-sigint := make(chan os.Signal, 1)
-signal.Notify(sigint, os.Interrupt, syscall.SIGTERM)
-<-sigint
-
-log.Println("Shutting down server...")
-ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-defer cancel()
-
-if err := server.Shutdown(ctx); err != nil {
-log.Printf("Server shutdown error: %v", err)
-}
-}()
-
-// Запуск сервера
-log.Printf("Starting HTTPS server on port %d...", cfg.Server.Port)
-
-// Для продакшена нужны реальные сертификаты
-// Для разработки можно использовать self-signed
-certFile := cfg.Server.CertFile
-keyFile := cfg.Server.KeyFile
-
-if certFile == "" || keyFile == "" {
-log.Println("Warning: No TLS certificates configured. Using HTTP for development.")
-log.Printf("Server started at http://localhost:%d", cfg.Server.Port)
-if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-log.Fatalf("Server error: %v", err)
-}
-} else {
-log.Printf("Server started at https://localhost:%d", cfg.Server.Port)
-if err := server.ListenAndServeTLS(certFile, keyFile); err != nil && err != http.ErrServerClosed {
-log.Fatalf("Server error: %v", err)
-}
-}
+	log.Println("Server stopped")
 }

@@ -1,58 +1,184 @@
 package config
 
 import (
-	"time"
+	"fmt"
+	"os"
+	"strconv"
 )
 
 // Config содержит всю конфигурацию приложения
 type Config struct {
-	ScyllaDB   ScyllaDBConfig
-	Redis      RedisConfig
-	MinIO      MinIOConfig
+	Server       ServerConfig
+	ScyllaDB     ScyllaDBConfig
+	Redis        RedisConfig
+	MinIO        MinIOConfig
 	ElasticSearch ElasticSearchConfig
 }
 
-// ScyllaDBConfig конфигурация подключения к ScyllaDB
+// ServerConfig конфигурация сервера
+type ServerConfig struct {
+	Port     int
+	CertFile string
+	KeyFile  string
+}
+
+// ScyllaDBConfig конфигурация ScyllaDB
 type ScyllaDBConfig struct {
-	Hosts        []string      `env:"SCYLLA_HOSTS" env-default:"localhost:9042"`
-	Keyspace     string        `env:"SCYLLA_KEYSPACE" env-default:"messenger"`
-	Timeout      time.Duration `env:"SCYLLA_TIMEOUT" env-default:"5s"`
-	ConnectTimeout time.Duration `env:"SCYLLA_CONNECT_TIMEOUT" env-default:"10s"`
-	Username     string        `env:"SCYLLA_USERNAME"`
-	Password     string        `env:"SCYLLA_PASSWORD"`
-	Consistency  string        `env:"SCYLLA_CONSISTENCY" env-default:"LOCAL_QUORUM"`
+	Hosts    []string
+	Port     int
+	Keyspace string
+	Username string
+	Password string
 }
 
-// RedisConfig конфигурация подключения к Redis
+// RedisConfig конфигурация Redis
 type RedisConfig struct {
-	Addr         string        `env:"REDIS_ADDR" env-default:"localhost:6379"`
-	Password     string        `env:"REDIS_PASSWORD"`
-	DB           int           `env:"REDIS_DB" env-default:"0"`
-	PoolSize     int           `env:"REDIS_POOL_SIZE" env-default:"100"`
-	MinIdleConns int           `env:"REDIS_MIN_IDLE_CONNS" env-default:"10"`
-	Timeout      time.Duration `env:"REDIS_TIMEOUT" env-default:"5s"`
-	DialTimeout  time.Duration `env:"REDIS_DIAL_TIMEOUT" env-default:"5s"`
-	ReadTimeout  time.Duration `env:"REDIS_READ_TIMEOUT" env-default:"3s"`
-	WriteTimeout time.Duration `env:"REDIS_WRITE_TIMEOUT" env-default:"3s"`
+	Host     string
+	Port     int
+	Password string
+	DB       int
 }
 
-// MinIOConfig конфигурация подключения к MinIO S3
+// MinIOConfig конфигурация MinIO S3
 type MinIOConfig struct {
-	Endpoint        string `env:"MINIO_ENDPOINT" env-default:"localhost:9000"`
-	AccessKeyID     string `env:"MINIO_ACCESS_KEY_ID" env-default:"minioadmin"`
-	SecretAccessKey string `env:"MINIO_SECRET_ACCESS_KEY" env-default:"minioadmin"`
-	BucketName      string `env:"MINIO_BUCKET_NAME" env-default:"messenger-files"`
-	UseSSL          bool   `env:"MINIO_USE_SSL" env-default:"false"`
-	Region          string `env:"MINIO_REGION" env-default:"us-east-1"`
+	Endpoint        string
+	AccessKeyID     string
+	SecretAccessKey string
+	UseSSL          bool
+	BucketName      string
 }
 
-// ElasticSearchConfig конфигурация подключения к ElasticSearch
+// ElasticSearchConfig конфигурация ElasticSearch
 type ElasticSearchConfig struct {
-	Addresses    []string      `env:"ELASTICSEARCH_ADDRESSES" env-default:"http://localhost:9200"`
-	Username     string        `env:"ELASTICSEARCH_USERNAME"`
-	Password     string        `env:"ELASTICSEARCH_PASSWORD"`
-	IndexPrefix  string        `env:"ELASTICSEARCH_INDEX_PREFIX" env-default:"messenger"`
-	Sniff        bool          `env:"ELASTICSEARCH_SNIFF" env-default:"false"`
-	HealthCheck  bool          `env:"ELASTICSEARCH_HEALTH_CHECK" env-default:"true"`
-	Timeout      time.Duration `env:"ELASTICSEARCH_TIMEOUT" env-default:"10s"`
+	Addresses []string
+	Username  string
+	Password  string
+}
+
+// Load загружает конфигурацию из переменных окружения
+func Load() (*Config, error) {
+	cfg := &Config{
+		Server: ServerConfig{
+			Port:     getEnvInt("SERVER_PORT", 8443),
+			CertFile: getEnv("SERVER_CERT_FILE", "cert.pem"),
+			KeyFile:  getEnv("SERVER_KEY_FILE", "key.pem"),
+		},
+		ScyllaDB: ScyllaDBConfig{
+			Hosts:    getEnvSlice("SCYLLADB_HOSTS", "localhost"),
+			Port:     getEnvInt("SCYLLADB_PORT", 9042),
+			Keyspace: getEnv("SCYLLADB_KEYSPACE", "messenger"),
+			Username: getEnv("SCYLLADB_USERNAME", ""),
+			Password: getEnv("SCYLLADB_PASSWORD", ""),
+		},
+		Redis: RedisConfig{
+			Host:     getEnv("REDIS_HOST", "localhost"),
+			Port:     getEnvInt("REDIS_PORT", 6379),
+			Password: getEnv("REDIS_PASSWORD", ""),
+			DB:       getEnvInt("REDIS_DB", 0),
+		},
+		MinIO: MinIOConfig{
+			Endpoint:        getEnv("MINIO_ENDPOINT", "localhost:9000"),
+			AccessKeyID:     getEnv("MINIO_ACCESS_KEY", "minioadmin"),
+			SecretAccessKey: getEnv("MINIO_SECRET_KEY", "minioadmin"),
+			UseSSL:          getEnvBool("MINIO_USE_SSL", false),
+			BucketName:      getEnv("MINIO_BUCKET", "messenger"),
+		},
+		ElasticSearch: ElasticSearchConfig{
+			Addresses: getEnvSlice("ELASTICSEARCH_ADDRESSES", "http://localhost:9200"),
+			Username:  getEnv("ELASTICSEARCH_USERNAME", ""),
+			Password:  getEnv("ELASTICSEARCH_PASSWORD", ""),
+		},
+	}
+
+	return cfg, nil
+}
+
+// Validate проверяет корректность конфигурации
+func (c *Config) Validate() error {
+	if c.Server.Port < 1 || c.Server.Port > 65535 {
+		return fmt.Errorf("invalid server port: %d", c.Server.Port)
+	}
+
+	if len(c.ScyllaDB.Hosts) == 0 {
+		return fmt.Errorf("scylladb hosts cannot be empty")
+	}
+
+	if c.Redis.Host == "" {
+		return fmt.Errorf("redis host cannot be empty")
+	}
+
+	if c.MinIO.Endpoint == "" {
+		return fmt.Errorf("minio endpoint cannot be empty")
+	}
+
+	if len(c.ElasticSearch.Addresses) == 0 {
+		return fmt.Errorf("elasticsearch addresses cannot be empty")
+	}
+
+	return nil
+}
+
+// GetRedisAddr возвращает адрес Redis
+func (c *RedisConfig) GetAddr() string {
+	return fmt.Sprintf("%s:%d", c.Host, c.Port)
+}
+
+// GetScyllaDBAddrs возвращает адреса ScyllaDB
+func (c *ScyllaDBConfig) GetAddrs() []string {
+	addrs := make([]string, len(c.Hosts))
+	for i, host := range c.Hosts {
+		addrs[i] = fmt.Sprintf("%s:%d", host, c.Port)
+	}
+	return addrs
+}
+
+// Вспомогательные функции
+
+func getEnv(key, defaultValue string) string {
+	if value, exists := os.LookupEnv(key); exists {
+		return value
+	}
+	return defaultValue
+}
+
+func getEnvInt(key string, defaultValue int) int {
+	if value, exists := os.LookupEnv(key); exists {
+		if intValue, err := strconv.Atoi(value); err == nil {
+			return intValue
+		}
+	}
+	return defaultValue
+}
+
+func getEnvBool(key string, defaultValue bool) bool {
+	if value, exists := os.LookupEnv(key); exists {
+		if boolValue, err := strconv.ParseBool(value); err == nil {
+			return boolValue
+		}
+	}
+	return defaultValue
+}
+
+func getEnvSlice(key, defaultValue string) []string {
+	if value, exists := os.LookupEnv(key); exists {
+		return splitString(value, ",")
+	}
+	return splitString(defaultValue, ",")
+}
+
+func splitString(s, sep string) []string {
+	if s == "" {
+		return []string{}
+	}
+	var result []string
+	start := 0
+	for i := 0; i <= len(s)-len(sep); i++ {
+		if s[i:i+len(sep)] == sep {
+			result = append(result, s[start:i])
+			start = i + len(sep)
+			i = start - 1
+		}
+	}
+	result = append(result, s[start:])
+	return result
 }
